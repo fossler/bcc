@@ -36,6 +36,13 @@ BPF_MAP_TYPE_CGROUP_ARRAY = 8
 BPF_MAP_TYPE_LRU_HASH = 9
 BPF_MAP_TYPE_LRU_PERCPU_HASH = 10
 BPF_MAP_TYPE_LPM_TRIE = 11
+BPF_MAP_TYPE_ARRAY_OF_MAPS = 12
+BPF_MAP_TYPE_HASH_OF_MAPS = 13
+BPF_MAP_TYPE_DEVMAP = 14
+BPF_MAP_TYPE_SOCKMAP = 15
+BPF_MAP_TYPE_CPUMAP = 16
+BPF_MAP_TYPE_XSKMAP = 17
+BPF_MAP_TYPE_SOCKHASH = 18
 
 stars_max = 40
 log2_index_max = 65
@@ -142,6 +149,12 @@ def Table(bpf, map_id, map_fd, keytype, leaftype, **kwargs):
         t = LruHash(bpf, map_id, map_fd, keytype, leaftype)
     elif ttype == BPF_MAP_TYPE_LRU_PERCPU_HASH:
         t = LruPerCpuHash(bpf, map_id, map_fd, keytype, leaftype)
+    elif ttype == BPF_MAP_TYPE_CGROUP_ARRAY:
+        t = CgroupArray(bpf, map_id, map_fd, keytype, leaftype)
+    elif ttype == BPF_MAP_TYPE_DEVMAP:
+        t = DevMap(bpf, map_id, map_fd, keytype, leaftype)
+    elif ttype == BPF_MAP_TYPE_CPUMAP:
+        t = CpuMap(bpf, map_id, map_fd, keytype, leaftype)
     if t == None:
         raise Exception("Unknown table type %d" % ttype)
     return t
@@ -199,8 +212,7 @@ class TableBase(MutableMapping):
         return leaf
 
     def __setitem__(self, key, leaf):
-        res = lib.bpf_update_elem(self.map_fd, ct.byref(key), ct.byref(leaf),
-                                  0)
+        res = lib.bpf_update_elem(self.map_fd, ct.byref(key), ct.byref(leaf), 0)
         if res < 0:
             errstr = os.strerror(ct.get_errno())
             raise Exception("Could not update table: %s" % errstr)
@@ -305,6 +317,15 @@ class TableBase(MutableMapping):
             tmp = {}
             f1 = self.Key._fields_[0][0]
             f2 = self.Key._fields_[1][0]
+
+            # The above code assumes that self.Key._fields_[1][0] holds the
+            # slot. But a padding member may have been inserted here, which
+            # breaks the assumption and leads to chaos.
+            # TODO: this is a quick fix. Fixing/working around in the BCC
+            # internal library is the right thing to do.
+            if f2 == '__pad_1' and len(self.Key._fields_) == 3:
+                f2 = self.Key._fields_[2][0]
+
             for k, v in self.items():
                 bucket = getattr(k, f1)
                 if bucket_fn:
@@ -313,7 +334,7 @@ class TableBase(MutableMapping):
                 slot = getattr(k, f2)
                 vals[slot] = v.value
 
-            buckets = tmp.keys()
+            buckets = list(tmp.keys())
             if bucket_sort_fn:
                 buckets = bucket_sort_fn(buckets)
 
@@ -476,6 +497,40 @@ class ProgArray(ArrayBase):
         if isinstance(leaf, self.bpf.Function):
             leaf = self.Leaf(leaf.fd)
         super(ProgArray, self).__setitem__(key, leaf)
+
+class FileDesc:
+    def __init__(self, fd):
+        if (fd is None) or (fd < 0):
+            raise Exception("Invalid file descriptor")
+        self.fd = fd
+
+    def clean_up(self):
+        if (self.fd is not None) and (self.fd >= 0):
+            os.close(self.fd)
+            self.fd = None
+
+    def __del__(self):
+        self.clean_up()
+
+    def __enter__(self, *args, **kwargs):
+        return self
+
+    def __exit__(self, *args, **kwargs):
+        self.clean_up()
+
+class CgroupArray(ArrayBase):
+    def __init__(self, *args, **kwargs):
+        super(CgroupArray, self).__init__(*args, **kwargs)
+
+    def __setitem__(self, key, leaf):
+        if isinstance(leaf, int):
+            super(CgroupArray, self).__setitem__(key, self.Leaf(leaf))
+        elif isinstance(leaf, str):
+            # TODO: Add os.O_CLOEXEC once we move to Python version >3.3
+            with FileDesc(os.open(leaf, os.O_RDONLY)) as f:
+                super(CgroupArray, self).__setitem__(key, self.Leaf(f.fd))
+        else:
+            raise Exception("Cgroup array key must be either FD or cgroup path")
 
 class PerfEventArray(ArrayBase):
 
@@ -687,22 +742,23 @@ class LpmTrie(TableBase):
     def __len__(self):
         raise NotImplementedError
 
-    def __delitem__(self, key):
-        # Not implemented for lpm trie as of kernel commit
-        # b95a5c4db09bc7c253636cb84dc9b12c577fd5a0
-        raise NotImplementedError
 
 class StackTrace(TableBase):
     MAX_DEPTH = 127
+    BPF_F_STACK_BUILD_ID = (1<<5)
+    BPF_STACK_BUILD_ID_EMPTY =  0 #can't get stacktrace
+    BPF_STACK_BUILD_ID_VALID = 1 #valid build-id,ip
+    BPF_STACK_BUILD_ID_IP = 2 #fallback to ip
 
     def __init__(self, *args, **kwargs):
         super(StackTrace, self).__init__(*args, **kwargs)
 
     class StackWalker(object):
-        def __init__(self, stack, resolve=None):
+        def __init__(self, stack, flags, resolve=None):
             self.stack = stack
             self.n = -1
             self.resolve = resolve
+            self.flags = flags
 
         def __iter__(self):
             return self
@@ -715,14 +771,21 @@ class StackTrace(TableBase):
             if self.n == StackTrace.MAX_DEPTH:
                 raise StopIteration()
 
-            addr = self.stack.ip[self.n]
+            if self.flags & StackTrace.BPF_F_STACK_BUILD_ID:
+              addr = self.stack.trace[self.n]
+              if addr.status == StackTrace.BPF_STACK_BUILD_ID_IP or \
+                 addr.status == StackTrace.BPF_STACK_BUILD_ID_EMPTY:
+                  raise StopIteration()
+            else:
+              addr = self.stack.ip[self.n]
+
             if addr == 0 :
                 raise StopIteration()
 
             return self.resolve(addr) if self.resolve else addr
 
     def walk(self, stack_id, resolve=None):
-        return StackTrace.StackWalker(self[self.Key(stack_id)], resolve)
+        return StackTrace.StackWalker(self[self.Key(stack_id)], self.flags, resolve)
 
     def __len__(self):
         i = 0
@@ -731,3 +794,11 @@ class StackTrace(TableBase):
 
     def clear(self):
         pass
+
+class DevMap(ArrayBase):
+    def __init__(self, *args, **kwargs):
+        super(DevMap, self).__init__(*args, **kwargs)
+
+class CpuMap(ArrayBase):
+    def __init__(self, *args, **kwargs):
+        super(CpuMap, self).__init__(*args, **kwargs)

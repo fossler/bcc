@@ -51,6 +51,8 @@
 // TODO: Remove this when CentOS 6 support is not needed anymore
 #include "setns.h"
 
+#include "libbpf/src/bpf.h"
+
 // TODO: remove these defines when linux-libc-dev exports them properly
 
 #ifndef __NR_bpf
@@ -82,7 +84,11 @@
 #define AF_ALG 38
 #endif
 
+#ifndef min
 #define min(x, y) ((x) < (y) ? (x) : (y))
+#endif
+
+#define UNUSED(expr) do { (void)(expr); } while (0)
 
 struct bpf_helper {
   char *name;
@@ -149,6 +155,39 @@ static struct bpf_helper helpers[] = {
   {"getsockopt", "4.15"},
   {"override_return", "4.16"},
   {"sock_ops_cb_flags_set", "4.16"},
+  {"msg_redirect_map", "4.17"},
+  {"msg_apply_bytes", "4.17"},
+  {"msg_cork_bytes", "4.17"},
+  {"msg_pull_data", "4.17"},
+  {"bind", "4.17"},
+  {"xdp_adjust_tail", "4.18"},
+  {"skb_get_xfrm_state", "4.18"},
+  {"get_stack", "4.18"},
+  {"skb_load_bytes_relative", "4.18"},
+  {"fib_lookup", "4.18"},
+  {"sock_hash_update", "4.18"},
+  {"msg_redirect_hash", "4.18"},
+  {"sk_redirect_hash", "4.18"},
+  {"lwt_push_encap", "4.18"},
+  {"lwt_seg6_store_bytes", "4.18"},
+  {"lwt_seg6_adjust_srh", "4.18"},
+  {"lwt_seg6_action", "4.18"},
+  {"rc_repeat", "4.18"},
+  {"rc_keydown", "4.18"},
+  {"skb_cgroup_id", "4.18"},
+  {"get_current_cgroup_id", "4.18"},
+  {"get_local_storage", "4.19"},
+  {"sk_select_reuseport", "4.19"},
+  {"skb_ancestor_cgroup_id", "4.19"},
+  {"sk_lookup_tcp", "4.20"},
+  {"sk_lookup_udp", "4.20"},
+  {"sk_release", "4.20"},
+  {"map_push_elem", "4.20"},
+  {"map_pop_elem", "4.20"},
+  {"map_peak_elem", "4.20"},
+  {"msg_push_data", "4.20"},
+  {"msg_pop_data", "4.21"},
+  {"rc_pointer_rel", "4.21"},
 };
 
 static uint64_t ptr_to_u64(void *ptr)
@@ -156,25 +195,19 @@ static uint64_t ptr_to_u64(void *ptr)
   return (uint64_t) (unsigned long) ptr;
 }
 
-int bpf_create_map(enum bpf_map_type map_type, const char *name,
+int bcc_create_map(enum bpf_map_type map_type, const char *name,
                    int key_size, int value_size,
                    int max_entries, int map_flags)
 {
   size_t name_len = name ? strlen(name) : 0;
-  union bpf_attr attr;
-  memset(&attr, 0, sizeof(attr));
-  attr.map_type = map_type;
-  attr.key_size = key_size;
-  attr.value_size = value_size;
-  attr.max_entries = max_entries;
-  attr.map_flags = map_flags;
-  memcpy(attr.map_name, name, min(name_len, BPF_OBJ_NAME_LEN - 1));
+  char map_name[BPF_OBJ_NAME_LEN];
 
-  int ret = syscall(__NR_bpf, BPF_MAP_CREATE, &attr, sizeof(attr));
-
+  memcpy(map_name, name, min(name_len, BPF_OBJ_NAME_LEN - 1));
+  int ret = bpf_create_map_name(map_type, map_name, key_size, value_size,
+                                max_entries, map_flags);
   if (ret < 0 && name_len && (errno == E2BIG || errno == EINVAL)) {
-    memset(attr.map_name, 0, BPF_OBJ_NAME_LEN);
-    ret = syscall(__NR_bpf, BPF_MAP_CREATE, &attr, sizeof(attr));
+    ret = bpf_create_map(map_type, key_size, value_size,
+			 max_entries, map_flags);
   }
 
   if (ret < 0 && errno == EPERM) {
@@ -185,7 +218,8 @@ int bpf_create_map(enum bpf_map_type map_type, const char *name,
       rl.rlim_max = RLIM_INFINITY;
       rl.rlim_cur = rl.rlim_max;
       if (setrlimit(RLIMIT_MEMLOCK, &rl) == 0)
-        ret = syscall(__NR_bpf, BPF_MAP_CREATE, &attr, sizeof(attr));
+        ret = bpf_create_map(map_type, key_size, value_size,
+                             max_entries, map_flags);
     }
   }
   return ret;
@@ -193,54 +227,29 @@ int bpf_create_map(enum bpf_map_type map_type, const char *name,
 
 int bpf_update_elem(int fd, void *key, void *value, unsigned long long flags)
 {
-  union bpf_attr attr;
-  memset(&attr, 0, sizeof(attr));
-  attr.map_fd = fd;
-  attr.key = ptr_to_u64(key);
-  attr.value = ptr_to_u64(value);
-  attr.flags = flags;
-
-  return syscall(__NR_bpf, BPF_MAP_UPDATE_ELEM, &attr, sizeof(attr));
+  return bpf_map_update_elem(fd, key, value, flags);
 }
 
 int bpf_lookup_elem(int fd, void *key, void *value)
 {
-  union bpf_attr attr;
-  memset(&attr, 0, sizeof(attr));
-  attr.map_fd = fd;
-  attr.key = ptr_to_u64(key);
-  attr.value = ptr_to_u64(value);
-
-  return syscall(__NR_bpf, BPF_MAP_LOOKUP_ELEM, &attr, sizeof(attr));
+  return bpf_map_lookup_elem(fd, key, value);
 }
 
 int bpf_delete_elem(int fd, void *key)
 {
-  union bpf_attr attr;
-  memset(&attr, 0, sizeof(attr));
-  attr.map_fd = fd;
-  attr.key = ptr_to_u64(key);
-
-  return syscall(__NR_bpf, BPF_MAP_DELETE_ELEM, &attr, sizeof(attr));
+  return bpf_map_delete_elem(fd, key);
 }
 
 int bpf_get_first_key(int fd, void *key, size_t key_size)
 {
-  union bpf_attr attr;
   int i, res;
-
-  memset(&attr, 0, sizeof(attr));
-  attr.map_fd = fd;
-  attr.key = 0;
-  attr.next_key = ptr_to_u64(key);
 
   // 4.12 and above kernel supports passing NULL to BPF_MAP_GET_NEXT_KEY
   // to get first key of the map. For older kernels, the call will fail.
-  res = syscall(__NR_bpf, BPF_MAP_GET_NEXT_KEY, &attr, sizeof(attr));
+  res = bpf_map_get_next_key(fd, 0, key);
   if (res < 0 && errno == EFAULT) {
     // Fall back to try to find a non-existing key.
     static unsigned char try_values[3] = {0, 0xff, 0x55};
-    attr.key = ptr_to_u64(key);
     for (i = 0; i < 3; i++) {
       memset(key, try_values[i], key_size);
       // We want to check the existence of the key but we don't know the size
@@ -250,11 +259,11 @@ int bpf_get_first_key(int fd, void *key, size_t key_size)
       // trigger a page fault in kernel and affect performance. Hence we use
       // ~0 which will fail and return fast.
       // This should fail since we pass an invalid pointer for value.
-      if (bpf_lookup_elem(fd, key, (void *)~0) >= 0)
+      if (bpf_map_lookup_elem(fd, key, (void *)~0) >= 0)
         return -1;
       // This means the key doesn't exist.
       if (errno == ENOENT)
-        return syscall(__NR_bpf, BPF_MAP_GET_NEXT_KEY, &attr, sizeof(attr));
+        return bpf_map_get_next_key(fd, (void*)&try_values[i], key);
     }
     return -1;
   } else {
@@ -264,13 +273,7 @@ int bpf_get_first_key(int fd, void *key, size_t key_size)
 
 int bpf_get_next_key(int fd, void *key, void *next_key)
 {
-  union bpf_attr attr;
-  memset(&attr, 0, sizeof(attr));
-  attr.map_fd = fd;
-  attr.key = ptr_to_u64(key);
-  attr.next_key = ptr_to_u64(next_key);
-
-  return syscall(__NR_bpf, BPF_MAP_GET_NEXT_KEY, &attr, sizeof(attr));
+  return bpf_map_get_next_key(fd, key, next_key);
 }
 
 static void bpf_print_hints(int ret, char *log)
@@ -311,6 +314,14 @@ static void bpf_print_hints(int ret, char *log)
       "you'll need to be explicit.\n\n");
   }
 
+  // referencing global/static variables or read only data
+  if (strstr(log, "unknown opcode") != NULL) {
+    fprintf(stderr, "HINT: The 'unknown opcode' can happen if you reference "
+      "a global or static variable, or data in read-only section. For example,"
+      " 'char *p = \"hello\"' will result in p referencing a read-only section,"
+      " and 'char p[] = \"hello\"' will have \"hello\" stored on the stack.\n\n");
+  }
+
   // helper function not found in kernel
   char *helper_str = strstr(log, "invalid func ");
   if (helper_str != NULL) {
@@ -331,19 +342,7 @@ static void bpf_print_hints(int ret, char *log)
 
 int bpf_obj_get_info(int prog_map_fd, void *info, uint32_t *info_len)
 {
-  union bpf_attr attr;
-  int err;
-
-  memset(&attr, 0, sizeof(attr));
-  attr.info.bpf_fd = prog_map_fd;
-  attr.info.info_len = *info_len;
-  attr.info.info = ptr_to_u64(info);
-
-  err = syscall(__NR_bpf, BPF_OBJ_GET_INFO_BY_FD, &attr, sizeof(attr));
-  if (!err)
-          *info_len = attr.info.info_len;
-
-  return err;
+  return bpf_obj_get_info_by_fd(prog_map_fd, info, info_len);
 }
 
 int bpf_prog_compute_tag(const struct bpf_insn *insns, int prog_len,
@@ -408,6 +407,8 @@ int bpf_prog_compute_tag(const struct bpf_insn *insns, int prog_len,
     return -1;
   }
   *ptag = __builtin_bswap64(u.tag);
+  close(shafd2);
+  close(shafd);
   return 0;
 }
 
@@ -438,7 +439,7 @@ int bpf_prog_get_tag(int fd, unsigned long long *ptag)
   return 0;
 }
 
-int bpf_prog_load(enum bpf_prog_type prog_type, const char *name,
+int bcc_prog_load(enum bpf_prog_type prog_type, const char *name,
                   const struct bpf_insn *insns, int prog_len,
                   const char *license, unsigned kern_version,
                   int log_level, char *log_buf, unsigned log_buf_size)
@@ -447,7 +448,7 @@ int bpf_prog_load(enum bpf_prog_type prog_type, const char *name,
   union bpf_attr attr;
   char *tmp_log_buf = NULL;
   unsigned tmp_log_buf_size = 0;
-  int ret = 0;
+  int ret = 0, name_offset = 0;
 
   memset(&attr, 0, sizeof(attr));
 
@@ -460,8 +461,8 @@ int bpf_prog_load(enum bpf_prog_type prog_type, const char *name,
   if (attr.insn_cnt > BPF_MAXINSNS) {
     errno = EINVAL;
     fprintf(stderr,
-            "bpf: %s. Program too large (%u insns), at most %d insns\n\n",
-            strerror(errno), attr.insn_cnt, BPF_MAXINSNS);
+            "bpf: %s. Program %s too large (%u insns), at most %d insns\n\n",
+            strerror(errno), name, attr.insn_cnt, BPF_MAXINSNS);
     return -1;
   }
 
@@ -488,7 +489,16 @@ int bpf_prog_load(enum bpf_prog_type prog_type, const char *name,
     }
   }
 
-  memcpy(attr.prog_name, name, min(name_len, BPF_OBJ_NAME_LEN - 1));
+  if (name_len) {
+    if (strncmp(name, "kprobe__", 8) == 0)
+      name_offset = 8;
+    else if (strncmp(name, "tracepoint__", 12) == 0)
+      name_offset = 12;
+    else if (strncmp(name, "raw_tracepoint__", 16) == 0)
+      name_offset = 16;
+    memcpy(attr.prog_name, name + name_offset,
+           min(name_len - name_offset, BPF_OBJ_NAME_LEN - 1));
+  }
 
   ret = syscall(__NR_bpf, BPF_PROG_LOAD, &attr, sizeof(attr));
   // BPF object name is not supported on older Kernels.
@@ -658,7 +668,7 @@ static int bpf_get_retprobe_bit(const char *event_type)
   close(fd);
   if (ret < 0 || ret >= sizeof(buf))
     return -1;
-  if (strlen(buf) < strlen("config:"))
+  if (strncmp(buf, "config:", strlen("config:")))
     return -1;
   errno = 0;
   ret = (int)strtol(buf + strlen("config:"), NULL, 10);
@@ -785,7 +795,7 @@ static int bpf_attach_tracing_event(int progfd, const char *event_path, int pid,
 }
 
 int bpf_attach_kprobe(int progfd, enum bpf_probe_attach_type attach_type,
-                      const char *ev_name, const char *fn_name)
+                      const char *ev_name, const char *fn_name, uint64_t fn_offset)
 {
   int kfd, pfd = -1;
   char buf[256];
@@ -793,7 +803,7 @@ int bpf_attach_kprobe(int progfd, enum bpf_probe_attach_type attach_type,
   static char *event_type = "kprobe";
 
   // Try create the kprobe Perf Event with perf_event_open API.
-  pfd = bpf_try_perf_event_open_with_probe(fn_name, 0, -1, event_type,
+  pfd = bpf_try_perf_event_open_with_probe(fn_name, fn_offset, -1, event_type,
                                            attach_type != BPF_PROBE_ENTRY);
   // If failed, most likely Kernel doesn't support the new perf_event_open API
   // yet. Try create the event using debugfs.
@@ -806,11 +816,20 @@ int bpf_attach_kprobe(int progfd, enum bpf_probe_attach_type attach_type,
     }
 
     snprintf(event_alias, sizeof(event_alias), "%s_bcc_%d", ev_name, getpid());
-    snprintf(buf, sizeof(buf), "%c:%ss/%s %s", attach_type==BPF_PROBE_ENTRY ? 'p' : 'r',
-             event_type, event_alias, fn_name);
+
+    if (fn_offset > 0 && attach_type == BPF_PROBE_ENTRY)
+      snprintf(buf, sizeof(buf), "p:%ss/%s %s+%"PRIu64,
+               event_type, event_alias, fn_name, fn_offset);
+    else
+      snprintf(buf, sizeof(buf), "%c:%ss/%s %s",
+               attach_type == BPF_PROBE_ENTRY ? 'p' : 'r',
+               event_type, event_alias, fn_name);
+
     if (write(kfd, buf, strlen(buf)) < 0) {
-      if (errno == EINVAL)
-        fprintf(stderr, "check dmesg output for possible cause\n");
+      if (errno == ENOENT)
+         fprintf(stderr, "cannot attach kprobe, probe entry may not exist\n");
+      else
+         fprintf(stderr, "cannot attach kprobe, %s\n", strerror(errno));
       close(kfd);
       goto error;
     }
@@ -888,6 +907,7 @@ static void exit_mount_ns(int fd) {
 
   if (setns(fd, CLONE_NEWNS))
     perror("setns");
+  close(fd);
 }
 
 int bpf_attach_uprobe(int progfd, enum bpf_probe_attach_type attach_type,
@@ -917,7 +937,7 @@ int bpf_attach_uprobe(int progfd, enum bpf_probe_attach_type attach_type,
       goto error;
     }
     res = snprintf(buf, sizeof(buf), "%c:%ss/%s %s:0x%lx", attach_type==BPF_PROBE_ENTRY ? 'p' : 'r',
-                   event_type, event_alias, binary_path, offset);
+                   event_type, event_alias, binary_path, (unsigned long)offset);
     if (res < 0 || res >= sizeof(buf)) {
       fprintf(stderr, "Event alias (%s) too long for buffer\n", event_alias);
       goto error;
@@ -984,6 +1004,7 @@ static int bpf_detach_probe(const char *ev_name, const char *event_type)
       found_event = 1;
       break;
     }
+  free(cptr);
   fclose(fp);
   fp = NULL;
 
@@ -1045,9 +1066,21 @@ int bpf_attach_tracepoint(int progfd, const char *tp_category,
 }
 
 int bpf_detach_tracepoint(const char *tp_category, const char *tp_name) {
+  UNUSED(tp_category);
+  UNUSED(tp_name);
   // Right now, there is nothing to do, but it's a good idea to encourage
   // callers to detach anything they attach.
   return 0;
+}
+
+int bpf_attach_raw_tracepoint(int progfd, char *tp_name)
+{
+  int ret;
+
+  ret = bpf_raw_tracepoint_open(tp_name, progfd);
+  if (ret < 0)
+    fprintf(stderr, "bpf_attach_raw_tracepoint (%s): %s\n", tp_name, strerror(errno));
+  return ret;
 }
 
 void * bpf_open_perf_buffer(perf_reader_raw_cb raw_cb,
@@ -1158,124 +1191,45 @@ int bpf_open_perf_event(uint32_t type, uint64_t config, int pid, int cpu) {
 }
 
 int bpf_attach_xdp(const char *dev_name, int progfd, uint32_t flags) {
-    struct sockaddr_nl sa;
-    int sock, seq = 0, len, ret = -1;
-    char buf[4096];
-    struct nlattr *nla, *nla_xdp;
-    struct {
-        struct nlmsghdr  nh;
-        struct ifinfomsg ifinfo;
-        char             attrbuf[64];
-    } req;
-    struct nlmsghdr *nh;
-    struct nlmsgerr *err;
-    socklen_t addrlen;
+  int ifindex = if_nametoindex(dev_name);
+  char err_buf[256];
+  int ret = -1;
 
-    memset(&sa, 0, sizeof(sa));
-    sa.nl_family = AF_NETLINK;
+  if (ifindex == 0) {
+    fprintf(stderr, "bpf: Resolving device name to index: %s\n", strerror(errno));
+    return -1;
+  }
 
-    sock = socket(AF_NETLINK, SOCK_RAW, NETLINK_ROUTE);
-    if (sock < 0) {
-        fprintf(stderr, "bpf: opening a netlink socket: %s\n", strerror(errno));
-        return -1;
-    }
+  ret = bpf_set_link_xdp_fd(ifindex, progfd, flags);
+  if (ret) {
+    libbpf_strerror(ret, err_buf, sizeof(err_buf));
+    fprintf(stderr, "bpf: Attaching prog to %s: %s", dev_name, err_buf);
+    return -1;
+  }
 
-    if (bind(sock, (struct sockaddr *)&sa, sizeof(sa)) < 0) {
-        fprintf(stderr, "bpf: bind to netlink: %s\n", strerror(errno));
-        goto cleanup;
-    }
+  return 0;
+}
 
-    addrlen = sizeof(sa);
-    if (getsockname(sock, (struct sockaddr *)&sa, &addrlen) < 0) {
-        fprintf(stderr, "bpf: get sock name of netlink: %s\n", strerror(errno));
-        goto cleanup;
-    }
+int bpf_attach_perf_event_raw(int progfd, void *perf_event_attr, pid_t pid,
+                              int cpu, int group_fd, unsigned long extra_flags) {
+  int fd = syscall(__NR_perf_event_open, perf_event_attr, pid, cpu, group_fd,
+                   PERF_FLAG_FD_CLOEXEC | extra_flags);
+  if (fd < 0) {
+    perror("perf_event_open failed");
+    return -1;
+  }
+  if (ioctl(fd, PERF_EVENT_IOC_SET_BPF, progfd) != 0) {
+    perror("ioctl(PERF_EVENT_IOC_SET_BPF) failed");
+    close(fd);
+    return -1;
+  }
+  if (ioctl(fd, PERF_EVENT_IOC_ENABLE, 0) != 0) {
+    perror("ioctl(PERF_EVENT_IOC_ENABLE) failed");
+    close(fd);
+    return -1;
+  }
 
-    if (addrlen != sizeof(sa)) {
-        fprintf(stderr, "bpf: wrong netlink address length: %d\n", addrlen);
-        goto cleanup;
-    }
-
-    memset(&req, 0, sizeof(req));
-    req.nh.nlmsg_len = NLMSG_LENGTH(sizeof(struct ifinfomsg));
-    req.nh.nlmsg_flags = NLM_F_REQUEST | NLM_F_ACK;
-    req.nh.nlmsg_type = RTM_SETLINK;
-    req.nh.nlmsg_pid = 0;
-    req.nh.nlmsg_seq = ++seq;
-    req.ifinfo.ifi_family = AF_UNSPEC;
-    req.ifinfo.ifi_index = if_nametoindex(dev_name);
-    if (req.ifinfo.ifi_index == 0) {
-        fprintf(stderr, "bpf: Resolving device name to index: %s\n", strerror(errno));
-        goto cleanup;
-    }
-
-    nla = (struct nlattr *)(((char *)&req)
-                            + NLMSG_ALIGN(req.nh.nlmsg_len));
-    nla->nla_type = NLA_F_NESTED | 43/*IFLA_XDP*/;
-
-    nla_xdp = (struct nlattr *)((char *)nla + NLA_HDRLEN);
-    nla->nla_len = NLA_HDRLEN;
-
-    // we specify the FD passed over by the user
-    nla_xdp->nla_type = 1/*IFLA_XDP_FD*/;
-    nla_xdp->nla_len = NLA_HDRLEN + sizeof(progfd);
-    memcpy((char *)nla_xdp + NLA_HDRLEN, &progfd, sizeof(progfd));
-    nla->nla_len += nla_xdp->nla_len;
-
-    // parse flags as passed by the user
-    if (flags) {
-        nla_xdp = (struct nlattr *)((char *)nla + nla->nla_len);
-        nla_xdp->nla_type = 3/*IFLA_XDP_FLAGS*/;
-        nla_xdp->nla_len = NLA_HDRLEN + sizeof(flags);
-        memcpy((char *)nla_xdp + NLA_HDRLEN, &flags, sizeof(flags));
-        nla->nla_len += nla_xdp->nla_len;
-    }
-
-    req.nh.nlmsg_len += NLA_ALIGN(nla->nla_len);
-
-    if (send(sock, &req, req.nh.nlmsg_len, 0) < 0) {
-        fprintf(stderr, "bpf: send to netlink: %s\n", strerror(errno));
-        goto cleanup;
-    }
-
-    len = recv(sock, buf, sizeof(buf), 0);
-    if (len < 0) {
-        fprintf(stderr, "bpf: recv from netlink: %s\n", strerror(errno));
-        goto cleanup;
-    }
-
-    for (nh = (struct nlmsghdr *)buf; NLMSG_OK(nh, len);
-         nh = NLMSG_NEXT(nh, len)) {
-        if (nh->nlmsg_pid != sa.nl_pid) {
-            fprintf(stderr, "bpf: Wrong pid %u, expected %u\n",
-                   nh->nlmsg_pid, sa.nl_pid);
-            errno = EBADMSG;
-            goto cleanup;
-        }
-        if (nh->nlmsg_seq != seq) {
-            fprintf(stderr, "bpf: Wrong seq %d, expected %d\n",
-                   nh->nlmsg_seq, seq);
-            errno = EBADMSG;
-            goto cleanup;
-        }
-        switch (nh->nlmsg_type) {
-            case NLMSG_ERROR:
-                err = (struct nlmsgerr *)NLMSG_DATA(nh);
-                if (!err->error)
-                    continue;
-                fprintf(stderr, "bpf: nlmsg error %s\n", strerror(-err->error));
-                errno = -err->error;
-                goto cleanup;
-            case NLMSG_DONE:
-                break;
-        }
-    }
-
-    ret = 0;
-
-cleanup:
-    close(sock);
-    return ret;
+  return fd;
 }
 
 int bpf_attach_perf_event(int progfd, uint32_t ev_type, uint32_t ev_config,
@@ -1303,25 +1257,7 @@ int bpf_attach_perf_event(int progfd, uint32_t ev_type, uint32_t ev_config,
     attr.sample_period = sample_period;
   }
 
-  int fd = syscall(
-    __NR_perf_event_open, &attr, pid, cpu, group_fd, PERF_FLAG_FD_CLOEXEC
-  );
-  if (fd < 0) {
-    perror("perf_event_open failed");
-    return -1;
-  }
-  if (ioctl(fd, PERF_EVENT_IOC_SET_BPF, progfd) != 0) {
-    perror("ioctl(PERF_EVENT_IOC_SET_BPF) failed");
-    close(fd);
-    return -1;
-  }
-  if (ioctl(fd, PERF_EVENT_IOC_ENABLE, 0) != 0) {
-    perror("ioctl(PERF_EVENT_IOC_ENABLE) failed");
-    close(fd);
-    return -1;
-  }
-
-  return fd;
+  return bpf_attach_perf_event_raw(progfd, &attr, pid, cpu, group_fd, 0);
 }
 
 int bpf_close_perf_event_fd(int fd) {
@@ -1339,60 +1275,4 @@ int bpf_close_perf_event_fd(int fd) {
     }
   }
   return error;
-}
-
-int bpf_obj_pin(int fd, const char *pathname)
-{
-  union bpf_attr attr;
-
-  memset(&attr, 0, sizeof(attr));
-  attr.pathname = ptr_to_u64((void *)pathname);
-  attr.bpf_fd = fd;
-
-  return syscall(__NR_bpf, BPF_OBJ_PIN, &attr, sizeof(attr));
-}
-
-int bpf_obj_get(const char *pathname)
-{
-  union bpf_attr attr;
-
-  memset(&attr, 0, sizeof(attr));
-  attr.pathname = ptr_to_u64((void *)pathname);
-
-  return syscall(__NR_bpf, BPF_OBJ_GET, &attr, sizeof(attr));
-}
-
-int bpf_prog_get_next_id(uint32_t start_id, uint32_t *next_id)
-{
-  union bpf_attr attr;
-  int err;
-
-  memset(&attr, 0, sizeof(attr));
-  attr.start_id = start_id;
-
-  err = syscall(__NR_bpf, BPF_PROG_GET_NEXT_ID, &attr, sizeof(attr));
-  if (!err)
-    *next_id = attr.next_id;
-
-  return err;
-}
-
-int bpf_prog_get_fd_by_id(uint32_t id)
-{
-  union bpf_attr attr;
-
-  memset(&attr, 0, sizeof(attr));
-  attr.prog_id = id;
-
-  return syscall(__NR_bpf, BPF_PROG_GET_FD_BY_ID, &attr, sizeof(attr));
-}
-
-int bpf_map_get_fd_by_id(uint32_t id)
-{
-  union bpf_attr attr;
-
-  memset(&attr, 0, sizeof(attr));
-  attr.map_id = id;
-
-  return syscall(__NR_bpf, BPF_MAP_GET_FD_BY_ID, &attr, sizeof(attr));
 }

@@ -18,7 +18,9 @@
 #ifndef LIBBPF_H
 #define LIBBPF_H
 
-#include "compat/linux/bpf.h"
+#include "linux/bpf.h"
+#include <stdint.h>
+#include <sys/types.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -29,7 +31,7 @@ enum bpf_probe_attach_type {
 	BPF_PROBE_RETURN
 };
 
-int bpf_create_map(enum bpf_map_type map_type, const char *name,
+int bcc_create_map(enum bpf_map_type map_type, const char *name,
                    int key_size, int value_size, int max_entries,
                    int map_flags);
 int bpf_update_elem(int fd, void *key, void *value, unsigned long long flags);
@@ -54,7 +56,7 @@ int bpf_get_next_key(int fd, void *key, void *next_key);
  *     printing, and continue to attempt increase that allocated buffer size if
  *     initial attemp was insufficient in size.
  */
-int bpf_prog_load(enum bpf_prog_type prog_type, const char *name,
+int bcc_prog_load(enum bpf_prog_type prog_type, const char *name,
                   const struct bpf_insn *insns, int insn_len,
                   const char *license, unsigned kern_version,
                   int log_level, char *log_buf, unsigned log_buf_size);
@@ -69,7 +71,7 @@ typedef void (*perf_reader_raw_cb)(void *cb_cookie, void *raw, int raw_size);
 typedef void (*perf_reader_lost_cb)(void *cb_cookie, uint64_t lost);
 
 int bpf_attach_kprobe(int progfd, enum bpf_probe_attach_type attach_type,
-                      const char *ev_name, const char *fn_name);
+                      const char *ev_name, const char *fn_name, uint64_t fn_offset);
 int bpf_detach_kprobe(const char *ev_name);
 
 int bpf_attach_uprobe(int progfd, enum bpf_probe_attach_type attach_type,
@@ -81,6 +83,8 @@ int bpf_attach_tracepoint(int progfd, const char *tp_category,
                           const char *tp_name);
 int bpf_detach_tracepoint(const char *tp_category, const char *tp_name);
 
+int bpf_attach_raw_tracepoint(int progfd, char *tp_name);
+
 void * bpf_open_perf_buffer(perf_reader_raw_cb raw_cb,
                             perf_reader_lost_cb lost_cb, void *cb_cookie,
                             int pid, int cpu, int page_cnt);
@@ -88,6 +92,10 @@ void * bpf_open_perf_buffer(perf_reader_raw_cb raw_cb,
 /* attached a prog expressed by progfd to the device specified in dev_name */
 int bpf_attach_xdp(const char *dev_name, int progfd, uint32_t flags);
 
+// attach a prog expressed by progfd to run on a specific perf event. The perf
+// event will be created using the perf_event_attr pointer provided.
+int bpf_attach_perf_event_raw(int progfd, void *perf_event_attr, pid_t pid,
+                              int cpu, int group_fd, unsigned long extra_flags);
 // attach a prog expressed by progfd to run on a specific perf event, with
 // certain sample period or sample frequency
 int bpf_attach_perf_event(int progfd, uint32_t ev_type, uint32_t ev_config,

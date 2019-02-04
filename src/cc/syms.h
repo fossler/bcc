@@ -108,6 +108,10 @@ class ProcSyms : SymbolCache {
     bcc_symbol_option *symbol_option_;
     ModuleType type_;
 
+    // The file offset within the ELF of the SO's first text section.
+    uint64_t elf_so_offset_;
+    uint64_t elf_so_addr_;
+
     std::unordered_set<std::string> symnames_;
     std::vector<Symbol> syms_;
 
@@ -142,4 +146,43 @@ public:
   virtual bool resolve_addr(uint64_t addr, struct bcc_symbol *sym, bool demangle = true);
   virtual bool resolve_name(const char *module, const char *name,
                             uint64_t *addr);
+};
+
+class BuildSyms {
+  struct Symbol {
+    Symbol(const std::string *name, uint64_t start, uint64_t size)
+      :name(name), start(start), size(size) {}
+    const std::string *name;
+    uint64_t start;
+    uint64_t size;
+
+    bool operator<(const struct Symbol &rhs) const {
+      return start < rhs.start;
+    }
+  };
+
+  struct Module {
+    Module(const char *module_name):
+      module_name_(module_name),
+      loaded_(false) {}
+    const std::string module_name_;
+    const std::string build_id_;
+    bool loaded_;
+    std::unordered_set<std::string> symnames_;
+    std::vector<Symbol> syms_;
+    bcc_symbol_option symbol_option_;
+
+    bool load_sym_table();
+    static int _add_symbol(const char *symname, uint64_t start, uint64_t size,
+                            void *p);
+    bool resolve_addr(uint64_t offset, struct bcc_symbol*, bool demangle=true);
+  };
+
+  std::unordered_map<std::string, std::unique_ptr<Module> > buildmap_;
+
+public:
+  BuildSyms() {}
+  virtual ~BuildSyms() = default;
+  virtual bool add_module(const std::string module_name);
+  virtual bool resolve_addr(std::string build_id, uint64_t offset, struct bcc_symbol *sym, bool demangle = true);
 };

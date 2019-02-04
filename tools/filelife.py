@@ -84,14 +84,14 @@ int trace_unlink(struct pt_regs *ctx, struct inode *dir, struct dentry *dentry)
     delta = (bpf_ktime_get_ns() - *tsp) / 1000000;
     birth.delete(&dentry);
 
-    if (dentry->d_name.len == 0)
+    struct qstr d_name = dentry->d_name;
+    if (d_name.len == 0)
         return 0;
 
     if (bpf_get_current_comm(&data.comm, sizeof(data.comm)) == 0) {
         data.pid = pid;
         data.delta = delta;
-        bpf_probe_read(&data.fname, sizeof(data.fname),
-            (void *)dentry->d_name.name);
+        bpf_probe_read(&data.fname, sizeof(data.fname), d_name.name);
     }
 
     events.perf_submit(ctx, &data, sizeof(data));
@@ -136,8 +136,12 @@ print("%-8s %-6s %-16s %-7s %s" % ("TIME", "PID", "COMM", "AGE(s)", "FILE"))
 def print_event(cpu, data, size):
     event = ct.cast(data, ct.POINTER(Data)).contents
     print("%-8s %-6d %-16s %-7.2f %s" % (strftime("%H:%M:%S"), event.pid,
-        event.comm.decode(), float(event.delta) / 1000, event.fname.decode()))
+        event.comm.decode('utf-8', 'replace'), float(event.delta) / 1000,
+        event.fname.decode('utf-8', 'replace')))
 
 b["events"].open_perf_buffer(print_event)
 while 1:
-    b.perf_buffer_poll()
+    try:
+        b.perf_buffer_poll()
+    except KeyboardInterrupt:
+        exit()

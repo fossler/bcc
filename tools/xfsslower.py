@@ -173,8 +173,15 @@ static int trace_return(struct pt_regs *ctx, int type)
 
     // calculate delta
     u64 ts = bpf_ktime_get_ns();
-    u64 delta_us = (ts - valp->ts) / 1000;
+    u64 delta_us = ts - valp->ts;
     entryinfo.delete(&id);
+
+    // Skip entries with backwards time: temp workaround for #728
+    if ((s64) delta_us < 0)
+        return 0;
+
+    delta_us /= 1000;
+
     if (FILTER_US)
         return 0;
 
@@ -187,10 +194,7 @@ static int trace_return(struct pt_regs *ctx, int type)
     bpf_get_current_comm(&data.task, sizeof(data.task));
 
     // workaround (rewriter should handle file to d_name in one step):
-    struct dentry *de = NULL;
-    struct qstr qs = {};
-    bpf_probe_read(&de, sizeof(de), &valp->fp->f_path.dentry);
-    bpf_probe_read(&qs, sizeof(qs), (void *)&de->d_name);
+    struct qstr qs = valp->fp->f_path.dentry->d_name;
     if (qs.len == 0)
         return 0;
     bpf_probe_read(&data.file, sizeof(data.file), (void *)qs.name);
@@ -299,4 +303,7 @@ else:
 # read events
 b["events"].open_perf_buffer(print_event, page_cnt=64)
 while 1:
-    b.perf_buffer_poll()
+    try:
+        b.perf_buffer_poll()
+    except KeyboardInterrupt:
+        exit()

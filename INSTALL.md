@@ -7,11 +7,14 @@
   - [Arch](#arch---aur)
   - [Gentoo](#gentoo---portage)
   - [openSUSE](#opensuse---binary)
+  - [RHEL](#rhel---binary)
+  - [Amazon Linux 1](#Amazon-Linux-1---Binary)
 * [Source](#source)
   - [Debian](#debian---source)
   - [Ubuntu](#ubuntu---source)
   - [Fedora](#fedora---source)
   - [openSUSE](#opensuse---source)
+  - [Amazon Linux](#amazon-linux---source)
 * [Older Instructions](#older-instructions)
 
 ## Kernel Configuration
@@ -50,17 +53,17 @@ Kernel compile flags can usually be checked by looking at `/proc/config.gz` or
 
 ## Ubuntu - Binary
 
-The stable and the nightly packages are built for Ubuntu Xenial (16.04) and Ubuntu Artful (17.10). The steps are very straightforward, no need to upgrade the kernel or compile from source!
+The stable and the nightly packages are built for Ubuntu Xenial (16.04), Ubuntu Artful (17.10) and Ubuntu Bionic (18.04). The steps are very straightforward, no need to upgrade the kernel or compile from source!
 
 **Stable and Signed Packages**
 
 ```bash
-sudo apt-key adv --keyserver keyserver.ubuntu.com --recv-keys D4284CDD
-echo "deb https://repo.iovisor.org/apt/xenial xenial main" | sudo tee /etc/apt/sources.list.d/iovisor.list
+sudo apt-key adv --keyserver keyserver.ubuntu.com --recv-keys 4052245BD4284CDD
+echo "deb https://repo.iovisor.org/apt/$(lsb_release -cs) $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/iovisor.list
 sudo apt-get update
 sudo apt-get install bcc-tools libbcc-examples linux-headers-$(uname -r)
 ```
-(s/xenial/artful as appropriate)
+(replace `xenial` with `artful` or `bionic` as appropriate). Tools will be installed under /usr/share/bcc/tools.
 
 **Nightly Packages**
 
@@ -69,7 +72,17 @@ echo "deb [trusted=yes] https://repo.iovisor.org/apt/xenial xenial-nightly main"
 sudo apt-get update
 sudo apt-get install bcc-tools libbcc-examples linux-headers-$(uname -r)
 ```
-(s/xenial/artful as appropriate)
+(replace `xenial` with `artful` or `bionic` as appropriate)
+
+**Ubuntu Packages**
+
+The previous commands will install the latest bcc from the iovisor repositories. It is also available from the standard Ubuntu multiverse repository, under the package name `bpfcc-tools`.
+
+```bash
+sudo apt-get install bpfcc-tools linux-headers-$(uname -r)
+```
+
+The tools are installed in /sbin with a -bpfcc extension. Try running `sudo opensnoop-bpfcc`.
 
 ## Fedora - Binary
 
@@ -84,18 +97,18 @@ sudo dnf update
 
 **Nightly Packages**
 
-Nightly bcc binary packages for Fedora 25, 26, and 27 are hosted at
+Nightly bcc binary packages for Fedora 25, 26, 27, and 28 are hosted at
 `https://repo.iovisor.org/yum/nightly/f{25,26,27}`.
 
 To install:
 ```bash
 echo -e '[iovisor]\nbaseurl=https://repo.iovisor.org/yum/nightly/f27/$basearch\nenabled=1\ngpgcheck=0' | sudo tee /etc/yum.repos.d/iovisor.repo
-sudo dnf install bcc-tools kernel-devel-$(uname -r) kernel-headers-$(uname -r)
+sudo dnf install bcc-tools kernel-headers kernel-devel
 ```
 
 **Stable and Signed Packages**
 
-Stable bcc binary packages for Fedora 25, 26, and 27 are hosted at
+Stable bcc binary packages for Fedora 25, 26, 27, and 28 are hosted at
 `https://repo.iovisor.org/yum/main/f{25,26,27}`.
 
 ```bash
@@ -144,6 +157,30 @@ sudo zypper ref
 sudo zypper in bcc-tools bcc-examples
 ```
 
+## RHEL - Binary
+
+For RHEL 7.6, bcc is already included in the official yum repository as bcc-tools. As part of the install, the following dependencies are installed: bcc.x86_64 0:0.6.1-2.el7 ,llvm-private.x86_64 0:6.0.1-2.el7 ,python-bcc.x86_64 0:0.6.1-2.el7,python-netaddr.noarch 0:0.7.5-9.el7
+
+```
+yum install bcc-tools
+```
+
+## Amazon Linux 1 - Binary
+Use case 1. Install BCC for latest kernel available in repo:
+   Tested on Amazon Linux AMI release 2018.03 (kernel 4.14.88-72.73.amzn1.x86_64)
+```
+sudo yum update kernel
+sudo yum install bcc
+sudo reboot
+```
+
+Use case 2. Install BCC for your AMI's default kernel (no reboot required):
+   Tested on Amazon Linux AMI release 2018.03 (kernel 4.14.77-70.59.amzn1.x86_64)
+```
+sudo yum install kernel-headers-$(uname -r | cut -d'.' -f1-5)
+sudo yum install kernel-devel-$(uname -r | cut -d'.' -f1-5)
+sudo yum install bcc
+```
 
 # Source
 
@@ -193,7 +230,7 @@ apt-get -t jessie-backports install linux-base linux-image-4.9.0-0.bpo.2-amd64 l
 apt-get install debhelper cmake libllvm3.8 llvm-3.8-dev libclang-3.8-dev \
   libelf-dev bison flex libedit-dev clang-format-3.8 python python-netaddr \
   python-pyroute2 luajit libluajit-5.1-dev arping iperf netperf ethtool \
-  devscripts zlib1g-dev
+  devscripts zlib1g-dev libfl-dev
 ```
 
 #### Sudo
@@ -249,8 +286,12 @@ deb-src http://llvm.org/apt/$VER/ llvm-toolchain-$VER-3.7 main" | \
 wget -O - http://llvm.org/apt/llvm-snapshot.gpg.key | sudo apt-key add -
 sudo apt-get update
 
-# All versions
-sudo apt-get -y install bison build-essential cmake3 flex git libedit-dev \
+# For bionic
+sudo apt-get -y install bison build-essential cmake flex git libedit-dev \
+  libllvm6.0 llvm-6.0-dev libclang-6.0-dev python zlib1g-dev libelf-dev
+
+# For other versions
+sudo apt-get -y install bison build-essential cmake flex git libedit-dev \
   libllvm3.7 llvm-3.7-dev libclang-3.7-dev python zlib1g-dev libelf-dev
 
 # For Lua support
@@ -310,7 +351,7 @@ sudo make install
 
 ```
 sudo zypper in bison cmake flex gcc gcc-c++ git libelf-devel libstdc++-devel \
-  llvm-devel pkg-config python-devel python-setuptools python3-devel \
+  llvm-devel clang-devel pkg-config python-devel python-setuptools python3-devel \
   python3-setuptools
 sudo zypper in luajit-devel       # for lua support in openSUSE Leap 42.2 or later
 sudo zypper in lua51-luajit-devel # for lua support in openSUSE Tumbleweed
@@ -330,6 +371,51 @@ pushd src/python/
 make
 sudo make install
 popd
+```
+
+## Amazon Linux - Source
+
+Tested on Amazon Linux AMI release 2018.03 (kernel 4.14.47-56.37.amzn1.x86_64)
+
+### Install packages required for building
+```
+# enable epel to get iperf, luajit, luajit-devel, cmake3 (cmake3 is required to support c++11) 
+sudo yum-config-manager --enable epel
+
+sudo yum install -y bison cmake3 ethtool flex git iperf libstdc++-static python-netaddr gcc gcc-c++ make zlib-devel elfutils-libelf-devel
+sudo yum install -y luajit luajit-devel
+sudo yum install -y http://repo.iovisor.org/yum/extra/mageia/cauldron/x86_64/netperf-2.7.0-1.mga6.x86_64.rpm
+sudo pip install pyroute2
+sudo yum install -y ncurses-devel
+```
+
+### Install clang 3.7.1 pre-built binaries
+```
+wget http://releases.llvm.org/3.7.1/clang+llvm-3.7.1-x86_64-fedora22.tar.xz
+tar xf clang*
+(cd clang* && sudo cp -R * /usr/local/)
+```
+
+### Build bcc
+```
+git clone https://github.com/iovisor/bcc.git
+pushd .
+mkdir bcc/build; cd bcc/build
+cmake3 .. -DCMAKE_INSTALL_PREFIX=/usr
+time make
+sudo make install
+popd
+```
+
+### Setup required to run the tools
+```
+sudo yum -y install kernel-devel-$(uname -r)
+sudo mount -t debugfs debugfs /sys/kernel/debug
+```
+
+### Test
+```
+sudo /usr/share/bcc/tools/execsnoop
 ```
 
 # Older Instructions

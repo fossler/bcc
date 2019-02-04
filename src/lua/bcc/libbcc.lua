@@ -24,13 +24,13 @@ enum bpf_prog_type {
   BPF_PROG_TYPE_SCHED_ACT,
 };
 
-int bpf_create_map(enum bpf_map_type map_type, int key_size, int value_size, int max_entries, int map_flags);
+int bcc_create_map(enum bpf_map_type map_type, int key_size, int value_size, int max_entries, int map_flags);
 int bpf_update_elem(int fd, void *key, void *value, unsigned long long flags);
 int bpf_lookup_elem(int fd, void *key, void *value);
 int bpf_delete_elem(int fd, void *key);
 int bpf_get_next_key(int fd, void *key, void *next_key);
 
-int bpf_prog_load(enum bpf_prog_type prog_type, const char *name,
+int bcc_prog_load(enum bpf_prog_type prog_type, const char *name,
   const struct bpf_insn *insns, int insn_len,
   const char *license, unsigned kern_version,
   int log_level, char *log_buf, unsigned log_buf_size);
@@ -43,7 +43,7 @@ typedef void (*perf_reader_raw_cb)(void *cb_cookie, void *raw, int raw_size);
 typedef void (*perf_reader_lost_cb)(void *cb_cookie, uint64_t lost);
 
 int bpf_attach_kprobe(int progfd, int attach_type, const char *ev_name,
-                      const char *fn_name);
+                      const char *fn_name, uint64_t fn_offset);
 
 int bpf_detach_kprobe(const char *ev_name);
 

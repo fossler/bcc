@@ -19,6 +19,7 @@
 #include <unordered_set>
 
 #include <fcntl.h>
+#include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
 
@@ -158,10 +159,14 @@ std::string Probe::largest_arg_type(size_t arg_n) {
 }
 
 bool Probe::usdt_getarg(std::ostream &stream) {
-  const size_t arg_count = locations_[0].arguments_.size();
-
-  if (!attached_to_)
+  if (!attached_to_ || attached_to_->empty())
     return false;
+
+  return usdt_getarg(stream, attached_to_.value());
+}
+
+bool Probe::usdt_getarg(std::ostream &stream, const std::string& probe_func) {
+  const size_t arg_count = locations_[0].arguments_.size();
 
   if (arg_count == 0)
     return true;
@@ -174,7 +179,7 @@ bool Probe::usdt_getarg(std::ostream &stream) {
                 "static __always_inline int _bpf_readarg_%s_%d("
                 "struct pt_regs *ctx, void *dest, size_t len) {\n"
                 "  if (len != sizeof(%s)) return -1;\n",
-                attached_to_.value(), arg_n + 1, ctype);
+                probe_func, arg_n + 1, ctype);
 
     if (locations_.size() == 1) {
       Location &location = locations_.front();
@@ -306,10 +311,8 @@ bool Context::enable_probe(const std::string &probe_name,
     }
   }
 
-  if (found_probe != nullptr) {
-    found_probe->enable(fn_name);
-    return true;
-  }
+  if (found_probe != nullptr)
+    return found_probe->enable(fn_name);
 
   return false;
 }
@@ -393,10 +396,19 @@ extern "C" {
 void *bcc_usdt_new_frompid(int pid, const char *path) {
   USDT::Context *ctx;
 
-  if (!path)
+  if (!path) {
     ctx = new USDT::Context(pid);
-  else
+  } else {
+    struct stat buffer;
+    if (strlen(path) >= 1 && path[0] != '/') {
+      fprintf(stderr, "HINT: Binary path should be absolute.\n\n");
+      return nullptr;
+    } else if (stat(path, &buffer) == -1) {
+      fprintf(stderr, "HINT: Specified binary doesn't exist.\n\n");
+      return nullptr;
+    }
     ctx = new USDT::Context(pid, path);
+  }
   if (!ctx->loaded()) {
     delete ctx;
     return nullptr;
@@ -464,8 +476,9 @@ const char *bcc_usdt_get_probe_argctype(
   void *ctx, const char* probe_name, const int arg_index
 ) {
   USDT::Probe *p = static_cast<USDT::Context *>(ctx)->get(probe_name);
-  std::string res = p ? p->get_arg_ctype(arg_index) : "";
-  return res.c_str();
+  if (p)
+    return p->get_arg_ctype(arg_index).c_str();
+  return "";
 }
 
 void bcc_usdt_foreach(void *usdt, bcc_usdt_cb callback) {

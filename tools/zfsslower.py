@@ -190,11 +190,7 @@ static int trace_return(struct pt_regs *ctx, int type)
     data.offset = valp->offset;
     bpf_get_current_comm(&data.task, sizeof(data.task));
 
-    // workaround (rewriter should handle file to d_name in one step):
-    struct dentry *de = NULL;
-    struct qstr qs = {};
-    bpf_probe_read(&de, sizeof(de), &valp->fp->f_path.dentry);
-    bpf_probe_read(&qs, sizeof(qs), (void *)&de->d_name);
+    struct qstr qs = valp->fp->f_path.dentry->d_name;
     if (qs.len == 0)
         return 0;
     bpf_probe_read(&data.file, sizeof(data.file), (void *)qs.name);
@@ -269,21 +265,23 @@ def print_event(cpu, data, size):
 
     if (csv):
         print("%d,%s,%d,%s,%d,%d,%d,%s" % (
-            event.ts_us, event.task, event.pid, type, event.size,
-            event.offset, event.delta_us, event.file))
+            event.ts_us, event.task.decode('utf-8', 'replace'), event.pid,
+            type, event.size, event.offset, event.delta_us,
+            event.file.decode('utf-8', 'replace')))
         return
     print("%-8s %-14.14s %-6s %1s %-7s %-8d %7.2f %s" % (strftime("%H:%M:%S"),
-        event.task, event.pid, type, event.size, event.offset / 1024,
-        float(event.delta_us) / 1000, event.file))
+        event.task.decode('utf-8', 'replace'), event.pid, type, event.size,
+        event.offset / 1024, float(event.delta_us) / 1000,
+        event.file.decode('utf-8', 'replace')))
 
 # initialize BPF
 b = BPF(text=bpf_text)
 
 # common file functions
-if BPF.get_kprobe_functions('zpl_iter'):
+if BPF.get_kprobe_functions(b'zpl_iter'):
     b.attach_kprobe(event="zpl_iter_read", fn_name="trace_rw_entry")
     b.attach_kprobe(event="zpl_iter_write", fn_name="trace_rw_entry")
-elif BPF.get_kprobe_functions('zpl_aio'):
+elif BPF.get_kprobe_functions(b'zpl_aio'):
     b.attach_kprobe(event="zpl_aio_read", fn_name="trace_rw_entry")
     b.attach_kprobe(event="zpl_aio_write", fn_name="trace_rw_entry")
 else:
@@ -291,10 +289,10 @@ else:
     b.attach_kprobe(event="zpl_write", fn_name="trace_rw_entry")
 b.attach_kprobe(event="zpl_open", fn_name="trace_open_entry")
 b.attach_kprobe(event="zpl_fsync", fn_name="trace_fsync_entry")
-if BPF.get_kprobe_functions('zpl_iter'):
+if BPF.get_kprobe_functions(b'zpl_iter'):
     b.attach_kretprobe(event="zpl_iter_read", fn_name="trace_read_return")
     b.attach_kretprobe(event="zpl_iter_write", fn_name="trace_write_return")
-elif BPF.get_kprobe_functions('zpl_aio'):
+elif BPF.get_kprobe_functions(b'zpl_aio'):
     b.attach_kretprobe(event="zpl_aio_read", fn_name="trace_read_return")
     b.attach_kretprobe(event="zpl_aio_write", fn_name="trace_write_return")
 else:
@@ -317,4 +315,7 @@ else:
 # read events
 b["events"].open_perf_buffer(print_event, page_cnt=64)
 while 1:
-    b.perf_buffer_poll()
+    try:
+        b.perf_buffer_poll()
+    except KeyboardInterrupt:
+        exit()

@@ -122,13 +122,13 @@ int ProcSyms::_add_load_sections(uint64_t v_addr, uint64_t mem_sz,
 }
 
 void ProcSyms::load_exe() {
+  ProcMountNSGuard g(mount_ns_instance_.get());
   std::string exe = ebpf::get_pid_exe(pid_);
   Module module(exe.c_str(), mount_ns_instance_.get(), &symbol_option_);
 
   if (module.type_ != ModuleType::EXEC)
     return;
 
-  ProcMountNSGuard g(mount_ns_instance_.get());
 
   bcc_elf_foreach_load_section(exe.c_str(), &_add_load_sections, &module);
 
@@ -158,6 +158,19 @@ int ProcSyms::_add_module(const char *modname, uint64_t start, uint64_t end,
     auto module = Module(
         modname, check_mount_ns ? ps->mount_ns_instance_.get() : nullptr,
         &ps->symbol_option_);
+
+    // pid/maps doesn't account for file_offset of text within the ELF.
+    // It only gives the mmap offset. We need the real offset for symbol
+    // lookup.
+    if (module.type_ == ModuleType::SO) {
+      ProcMountNSGuard g(ps->mount_ns_instance_.get());
+      if (bcc_elf_get_text_scn_info(modname, &module.elf_so_addr_,
+                                    &module.elf_so_offset_) < 0) {
+        fprintf(stderr, "WARNING: Couldn't find .text section in %s\n", modname);
+        fprintf(stderr, "WARNING: BCC can't handle sym look ups for %s", modname);
+      }
+    }
+
     if (!bcc_is_perf_map(modname) || module.type_ != ModuleType::UNKNOWN)
       // Always add the module even if we can't read it, so that we could
       // report correct module name. Unless it's a perf map that we only
@@ -191,7 +204,7 @@ bool ProcSyms::resolve_addr(uint64_t addr, struct bcc_symbol *sym,
     if (mod.contains(addr, offset)) {
       if (mod.find_addr(offset, sym)) {
         if (demangle) {
-          if (sym->name)
+          if (sym->name && (!strncmp(sym->name, "_Z", 2) || !strncmp(sym->name, "___Z", 4)))
             sym->demangle_name =
                 abi::__cxa_demangle(sym->name, nullptr, nullptr, nullptr);
           if (!sym->demangle_name)
@@ -251,6 +264,10 @@ ProcSyms::Module::Module(const char *name, ProcMountNS *mount_ns,
     type_ = ModuleType::PERF_MAP;
   else if (bcc_elf_is_vdso(name_.c_str()) == 1)
     type_ = ModuleType::VDSO;
+
+  // Will be stored later
+  elf_so_offset_ = 0;
+  elf_so_addr_ = 0;
 }
 
 int ProcSyms::Module::_add_symbol(const char *symname, uint64_t start,
@@ -282,13 +299,22 @@ void ProcSyms::Module::load_sym_table() {
 }
 
 bool ProcSyms::Module::contains(uint64_t addr, uint64_t &offset) const {
-  for (const auto &range : ranges_)
+  for (const auto &range : ranges_) {
     if (addr >= range.start && addr < range.end) {
-      offset = (type_ == ModuleType::SO || type_ == ModuleType::VDSO)
-                   ? (addr - range.start + range.file_offset)
-                   : addr;
+      if (type_ == ModuleType::SO || type_ == ModuleType::VDSO) {
+        // Offset within the mmap
+        offset = addr - range.start + range.file_offset;
+
+        // Offset within the ELF for SO symbol lookup
+        offset += (elf_so_addr_ - elf_so_offset_);
+      } else {
+        offset = addr;
+      }
+
       return true;
     }
+  }
+
   return false;
 }
 
@@ -352,6 +378,93 @@ bool ProcSyms::Module::find_addr(uint64_t offset, struct bcc_symbol *sym) {
   return false;
 }
 
+bool BuildSyms::Module::load_sym_table()
+{
+  if (loaded_)
+    return true;
+
+  symbol_option_ = {
+    .use_debug_file = 1,
+    .check_debug_file_crc = 1,
+    .use_symbol_type = (1 << STT_FUNC) | (1 << STT_GNU_IFUNC)
+  };
+
+  bcc_elf_foreach_sym(module_name_.c_str(), _add_symbol, &symbol_option_, this);
+  std::sort(syms_.begin(), syms_.end());
+
+  for(std::vector<Symbol>::iterator it = syms_.begin();
+      it != syms_.end(); ++it++) {
+  }
+  loaded_ = true;
+  return true;
+}
+
+int BuildSyms::Module::_add_symbol(const char *symname, uint64_t start,
+                                   uint64_t size, void *p)
+{
+  BuildSyms::Module *m = static_cast<BuildSyms::Module *> (p);
+  auto res = m->symnames_.emplace(symname);
+  m->syms_.emplace_back(&*(res.first), start, size);
+  return 0;
+}
+
+bool BuildSyms::Module::resolve_addr(uint64_t offset, struct bcc_symbol* sym,
+                                     bool demangle)
+{
+  std::vector<Symbol>::iterator it;
+
+  load_sym_table();
+
+  if (syms_.empty())
+    goto unknown_symbol;
+
+  it = std::upper_bound(syms_.begin(), syms_.end(), Symbol(nullptr, offset, 0));
+  if (it != syms_.begin()) {
+    it--;
+    sym->name = (*it).name->c_str();
+    if (demangle)
+      sym->demangle_name = sym->name;
+    sym->offset = offset - (*it).start;
+    sym->module = module_name_.c_str();
+    return true;
+  }
+
+unknown_symbol:
+  memset(sym, 0, sizeof(struct bcc_symbol));
+  return false;
+}
+
+bool BuildSyms::add_module(const std::string module_name)
+{
+  struct stat s;
+  char buildid[BPF_BUILD_ID_SIZE*2+1];
+
+  if (stat(module_name.c_str(), &s) < 0)
+     return false;
+
+  if (bcc_elf_get_buildid(module_name.c_str(), buildid) < 0)
+      return false;
+
+  std::string elf_buildid(buildid);
+  std::unique_ptr<BuildSyms::Module> ptr(new BuildSyms::Module(module_name.c_str()));
+  buildmap_[elf_buildid] = std::move(ptr);
+  return true;
+}
+
+bool BuildSyms::resolve_addr(std::string build_id, uint64_t offset,
+                             struct bcc_symbol *sym, bool demangle)
+{
+  std::unordered_map<std::string,std::unique_ptr<BuildSyms::Module> >::iterator it;
+
+  it = buildmap_.find(build_id);
+  if (it == buildmap_.end())
+    /*build-id not added to the BuildSym*/
+    return false;
+
+  BuildSyms::Module *mod = it->second.get();
+  return mod->resolve_addr(offset, sym, demangle);
+}
+
 extern "C" {
 
 void *bcc_symcache_new(int pid, struct bcc_symbol_option *option) {
@@ -395,6 +508,45 @@ void bcc_symcache_refresh(void *resolver) {
   cache->refresh();
 }
 
+void *bcc_buildsymcache_new(void) {
+  return static_cast<void *>(new BuildSyms());
+}
+
+void bcc_free_buildsymcache(void *symcache) {
+  delete static_cast<BuildSyms*>(symcache);
+}
+
+int  bcc_buildsymcache_add_module(void *resolver, const char *module_name)
+{
+  BuildSyms *bsym = static_cast<BuildSyms *>(resolver);
+  return  bsym->add_module(module_name) ? 0 : -1;
+}
+
+int bcc_buildsymcache_resolve(void *resolver,
+                              struct bpf_stack_build_id *trace,
+                              struct bcc_symbol *sym)
+{
+  std::string build_id;
+  unsigned char *c = &trace->build_id[0];
+  int idx = 0;
+
+  /*cannot resolve in case of fallback*/
+  if (trace->status == BPF_STACK_BUILD_ID_EMPTY ||
+      trace->status == BPF_STACK_BUILD_ID_IP)
+    return 0;
+
+  while( idx < 20) {
+    int nib1 = (c[idx]&0xf0)>>4;
+    int nib2 = (c[idx]&0x0f);
+    build_id += "0123456789abcdef"[nib1];
+    build_id += "0123456789abcdef"[nib2];
+    idx++;
+  }
+
+  BuildSyms *bsym = static_cast<BuildSyms *>(resolver);
+  return bsym->resolve_addr(build_id, trace->offset, sym) ? 0 : -1;
+}
+
 struct mod_st {
   const char *name;
   uint64_t start;
@@ -419,7 +571,7 @@ int bcc_resolve_global_addr(int pid, const char *module, const uint64_t address,
       mod.start == 0x0)
     return -1;
 
-  *global = mod.start + mod.file_offset + address;
+  *global = mod.start - mod.file_offset + address;
   return 0;
 }
 
@@ -474,7 +626,11 @@ int bcc_resolve_symname(const char *module, const char *symname,
   static struct bcc_symbol_option default_option = {
     .use_debug_file = 1,
     .check_debug_file_crc = 1,
+#if defined(__powerpc64__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+    .use_symbol_type = BCC_SYM_ALL_TYPES | (1 << STT_PPC64LE_SYM_LEP),
+#else
     .use_symbol_type = BCC_SYM_ALL_TYPES,
+#endif
   };
 
   if (module == NULL)

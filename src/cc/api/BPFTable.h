@@ -16,9 +16,9 @@
 
 #pragma once
 
-#include <cstring>
 #include <errno.h>
 #include <sys/epoll.h>
+#include <cstring>
 #include <exception>
 #include <map>
 #include <memory>
@@ -83,9 +83,7 @@ class BPFTableBase {
     return bpf_update_elem(desc.fd, key, value, 0) >= 0;
   }
 
-  bool remove(void* key) {
-    return bpf_delete_elem(desc.fd, key) >= 0;
-  }
+  bool remove(void* key) { return bpf_delete_elem(desc.fd, key) >= 0; }
 
   const TableDesc& desc;
 };
@@ -105,23 +103,30 @@ class BPFTable : public BPFTableBase<void, void> {
 
   StatusTuple remove_value(const std::string& key_str);
 
+  StatusTuple clear_table_non_atomic();
+  StatusTuple get_table_offline(std::vector<std::pair<std::string, std::string>> &res);
+
   static size_t get_possible_cpu_count();
 };
 
 template <class ValueType>
-void * get_value_addr(ValueType& t) { return &t; }
+void* get_value_addr(ValueType& t) {
+  return &t;
+}
 
 template <class ValueType>
-void * get_value_addr(std::vector<ValueType>& t) { return t.data(); }
+void* get_value_addr(std::vector<ValueType>& t) {
+  return t.data();
+}
 
 template <class ValueType>
 class BPFArrayTable : public BPFTableBase<int, ValueType> {
-public:
-  BPFArrayTable(const TableDesc& desc)
-      : BPFTableBase<int, ValueType>(desc) {
+ public:
+  BPFArrayTable(const TableDesc& desc) : BPFTableBase<int, ValueType>(desc) {
     if (desc.type != BPF_MAP_TYPE_ARRAY &&
         desc.type != BPF_MAP_TYPE_PERCPU_ARRAY)
-      throw std::invalid_argument("Table '" + desc.name + "' is not an array table");
+      throw std::invalid_argument("Table '" + desc.name +
+                                  "' is not an array table");
   }
 
   virtual StatusTuple get_value(const int& index, ValueType& value) {
@@ -131,7 +136,8 @@ public:
   }
 
   virtual StatusTuple update_value(const int& index, const ValueType& value) {
-    if (!this->update(const_cast<int*>(&index), get_value_addr(const_cast<ValueType&>(value))))
+    if (!this->update(const_cast<int*>(&index),
+                      get_value_addr(const_cast<ValueType&>(value))))
       return StatusTuple(-1, "Error updating value: %s", std::strerror(errno));
     return StatusTuple(0);
   }
@@ -145,7 +151,7 @@ public:
   std::vector<ValueType> get_table_offline() {
     std::vector<ValueType> res(this->capacity());
 
-    for (int i = 0; i < (int) this->capacity(); i++) {
+    for (int i = 0; i < (int)this->capacity(); i++) {
       get_value(i, res[i]);
     }
 
@@ -160,8 +166,10 @@ class BPFPercpuArrayTable : public BPFArrayTable<std::vector<ValueType>> {
       : BPFArrayTable<std::vector<ValueType>>(desc),
         ncpus(BPFTable::get_possible_cpu_count()) {
     if (desc.type != BPF_MAP_TYPE_PERCPU_ARRAY)
-      throw std::invalid_argument("Table '" + desc.name + "' is not a percpu array table");
-    // leaf structures have to be aligned to 8 bytes as hardcoded in the linux kernel.
+      throw std::invalid_argument("Table '" + desc.name +
+                                  "' is not a percpu array table");
+    // leaf structures have to be aligned to 8 bytes as hardcoded in the linux
+    // kernel.
     if (sizeof(ValueType) % 8)
       throw std::invalid_argument("leaf must be aligned to 8 bytes");
   }
@@ -171,11 +179,13 @@ class BPFPercpuArrayTable : public BPFArrayTable<std::vector<ValueType>> {
     return BPFArrayTable<std::vector<ValueType>>::get_value(index, value);
   }
 
-  StatusTuple update_value(const int& index, const std::vector<ValueType>& value) {
+  StatusTuple update_value(const int& index,
+                           const std::vector<ValueType>& value) {
     if (value.size() != ncpus)
       return StatusTuple(-1, "bad value size");
     return BPFArrayTable<std::vector<ValueType>>::update_value(index, value);
   }
+
  private:
   unsigned int ncpus;
 };
@@ -189,7 +199,8 @@ class BPFHashTable : public BPFTableBase<KeyType, ValueType> {
         desc.type != BPF_MAP_TYPE_PERCPU_HASH &&
         desc.type != BPF_MAP_TYPE_LRU_HASH &&
         desc.type != BPF_MAP_TYPE_LRU_PERCPU_HASH)
-      throw std::invalid_argument("Table '" + desc.name + "' is not a hash table");
+      throw std::invalid_argument("Table '" + desc.name +
+                                  "' is not a hash table");
   }
 
   virtual StatusTuple get_value(const KeyType& key, ValueType& value) {
@@ -199,7 +210,8 @@ class BPFHashTable : public BPFTableBase<KeyType, ValueType> {
   }
 
   virtual StatusTuple update_value(const KeyType& key, const ValueType& value) {
-    if (!this->update(const_cast<KeyType*>(&key), get_value_addr(const_cast<ValueType&>(value))))
+    if (!this->update(const_cast<KeyType*>(&key),
+                      get_value_addr(const_cast<ValueType&>(value))))
       return StatusTuple(-1, "Error updating value: %s", std::strerror(errno));
     return StatusTuple(0);
   }
@@ -221,11 +233,14 @@ class BPFHashTable : public BPFTableBase<KeyType, ValueType> {
     KeyType cur;
     ValueType value;
 
+    StatusTuple r(0);
+
     if (!this->first(&cur))
       return res;
 
     while (true) {
-      if (!this->lookup(&cur, &value))
+      r = get_value(cur, value);
+      if (r.code() != 0)
         break;
       res.emplace_back(cur, value);
       if (!this->next(&cur, &cur))
@@ -237,29 +252,26 @@ class BPFHashTable : public BPFTableBase<KeyType, ValueType> {
 
   StatusTuple clear_table_non_atomic() {
     KeyType cur;
-    if (!this->first(&cur))
-      return StatusTuple(0);
-
-    while (true) {
+    while (this->first(&cur))
       TRY2(remove_value(cur));
-      if (!this->next(&cur, &cur))
-        break;
-    }
 
     return StatusTuple(0);
   }
 };
 
 template <class KeyType, class ValueType>
-class BPFPercpuHashTable : public BPFHashTable<KeyType, std::vector<ValueType>> {
+class BPFPercpuHashTable
+    : public BPFHashTable<KeyType, std::vector<ValueType>> {
  public:
   explicit BPFPercpuHashTable(const TableDesc& desc)
       : BPFHashTable<KeyType, std::vector<ValueType>>(desc),
         ncpus(BPFTable::get_possible_cpu_count()) {
     if (desc.type != BPF_MAP_TYPE_PERCPU_HASH &&
         desc.type != BPF_MAP_TYPE_LRU_PERCPU_HASH)
-      throw std::invalid_argument("Table '" + desc.name + "' is not a percpu hash table");
-    // leaf structures have to be aligned to 8 bytes as hardcoded in the linux kernel.
+      throw std::invalid_argument("Table '" + desc.name +
+                                  "' is not a percpu hash table");
+    // leaf structures have to be aligned to 8 bytes as hardcoded in the linux
+    // kernel.
     if (sizeof(ValueType) % 8)
       throw std::invalid_argument("leaf must be aligned to 8 bytes");
   }
@@ -269,11 +281,14 @@ class BPFPercpuHashTable : public BPFHashTable<KeyType, std::vector<ValueType>> 
     return BPFHashTable<KeyType, std::vector<ValueType>>::get_value(key, value);
   }
 
-  StatusTuple update_value(const KeyType& key, const std::vector<ValueType>& value) {
+  StatusTuple update_value(const KeyType& key,
+                           const std::vector<ValueType>& value) {
     if (value.size() != ncpus)
       return StatusTuple(-1, "bad value size");
-    return BPFHashTable<KeyType, std::vector<ValueType>>::update_value(key, value);
+    return BPFHashTable<KeyType, std::vector<ValueType>>::update_value(key,
+                                                                       value);
   }
+
  private:
   unsigned int ncpus;
 };
@@ -286,9 +301,9 @@ struct stacktrace_t {
 
 class BPFStackTable : public BPFTableBase<int, stacktrace_t> {
  public:
-  BPFStackTable(const TableDesc& desc,
-                bool use_debug_file,
+  BPFStackTable(const TableDesc& desc, bool use_debug_file,
                 bool check_debug_file_crc);
+  BPFStackTable(BPFStackTable&& that);
   ~BPFStackTable();
 
   void clear_table_non_atomic();
@@ -300,16 +315,35 @@ class BPFStackTable : public BPFTableBase<int, stacktrace_t> {
   std::map<int, void*> pid_sym_;
 };
 
+// from src/cc/export/helpers.h
+struct stacktrace_buildid_t {
+  struct bpf_stack_build_id trace[BPF_MAX_STACK_DEPTH];
+};
+
+class BPFStackBuildIdTable : public BPFTableBase<int, stacktrace_buildid_t> {
+ public:
+  BPFStackBuildIdTable(const TableDesc& desc, bool use_debug_file,
+                       bool check_debug_file_crc, void *bsymcache);
+  ~BPFStackBuildIdTable() = default;
+
+  void clear_table_non_atomic();
+  std::vector<bpf_stack_build_id> get_stack_addr(int stack_id);
+  std::vector<std::string> get_stack_symbol(int stack_id);
+
+ private:
+  void *bsymcache_;
+  bcc_symbol_option symbol_option_;
+};
+
 class BPFPerfBuffer : public BPFTableBase<int, int> {
  public:
-  BPFPerfBuffer(const TableDesc& desc)
-      : BPFTableBase<int, int>(desc), epfd_(-1) {}
+  BPFPerfBuffer(const TableDesc& desc);
   ~BPFPerfBuffer();
 
   StatusTuple open_all_cpu(perf_reader_raw_cb cb, perf_reader_lost_cb lost_cb,
                            void* cb_cookie, int page_cnt);
   StatusTuple close_all_cpu();
-  void poll(int timeout_ms);
+  int poll(int timeout_ms);
 
  private:
   StatusTuple open_on_cpu(perf_reader_raw_cb cb, perf_reader_lost_cb lost_cb,
@@ -324,8 +358,7 @@ class BPFPerfBuffer : public BPFTableBase<int, int> {
 
 class BPFPerfEventArray : public BPFTableBase<int, int> {
  public:
-  BPFPerfEventArray(const TableDesc& desc)
-      : BPFTableBase<int, int>(desc) {}
+  BPFPerfEventArray(const TableDesc& desc);
   ~BPFPerfEventArray();
 
   StatusTuple open_all_cpu(uint32_t type, uint64_t config);
@@ -339,25 +372,30 @@ class BPFPerfEventArray : public BPFTableBase<int, int> {
 };
 
 class BPFProgTable : public BPFTableBase<int, int> {
+ public:
+  BPFProgTable(const TableDesc& desc);
+
+  StatusTuple update_value(const int& index, const int& prog_fd);
+  StatusTuple remove_value(const int& index);
+};
+
+class BPFCgroupArray : public BPFTableBase<int, int> {
+ public:
+  BPFCgroupArray(const TableDesc& desc);
+
+  StatusTuple update_value(const int& index, const int& cgroup2_fd);
+  StatusTuple update_value(const int& index, const std::string& cgroup2_path);
+  StatusTuple remove_value(const int& index);
+};
+
+class BPFDevmapTable : public BPFTableBase<int, int> {
 public:
-  BPFProgTable(const TableDesc& desc)
-      : BPFTableBase<int, int>(desc) {
-    if (desc.type != BPF_MAP_TYPE_PROG_ARRAY)
-      throw std::invalid_argument("Table '" + desc.name + "' is not a prog table");
-  }
+  BPFDevmapTable(const TableDesc& desc);
+  
+  StatusTuple update_value(const int& index, const int& value);
+  StatusTuple get_value(const int& index, int& value);
+  StatusTuple remove_value(const int& index);
 
-  // updates an element
-  StatusTuple update_value(const int& index, const int& value) {
-    if (!this->update(const_cast<int*>(&index), const_cast<int*>(&value)))
-      return StatusTuple(-1, "Error updating value: %s", std::strerror(errno));
-    return StatusTuple(0);
-  }
-
-  StatusTuple remove_value(const int& index) {
-    if (!this->remove(const_cast<int*>(&index)))
-      return StatusTuple(-1, "Error removing value: %s", std::strerror(errno));
-    return StatusTuple(0);
-  }
 };
 
 }  // namespace ebpf

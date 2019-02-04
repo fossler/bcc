@@ -61,7 +61,7 @@ BPF_HASH(args_filename, u32, const char *);
 BPF_HASH(infotmp, u32, struct val_t);
 BPF_PERF_OUTPUT(events);
 
-int trace_entry(struct pt_regs *ctx, const char __user *filename)
+int syscall__entry(struct pt_regs *ctx, const char __user *filename)
 {
     struct val_t val = {};
     u32 pid = bpf_get_current_pid_tgid();
@@ -114,17 +114,20 @@ b = BPF(text=bpf_text)
 # system calls but the name of the actual entry point may
 # be different for which we must check if the entry points
 # actually exist before attaching the probes
-if BPF.ksymname("sys_stat") != -1:
-    b.attach_kprobe(event="sys_stat", fn_name="trace_entry")
-    b.attach_kretprobe(event="sys_stat", fn_name="trace_return")
+syscall_fnname = b.get_syscall_fnname("stat")
+if BPF.ksymname(syscall_fnname) != -1:
+    b.attach_kprobe(event=syscall_fnname, fn_name="syscall__entry")
+    b.attach_kretprobe(event=syscall_fnname, fn_name="trace_return")
 
-if BPF.ksymname("sys_statfs") != -1:
-    b.attach_kprobe(event="sys_statfs", fn_name="trace_entry")
-    b.attach_kretprobe(event="sys_statfs", fn_name="trace_return")
+syscall_fnname = b.get_syscall_fnname("statfs")
+if BPF.ksymname(syscall_fnname) != -1:
+    b.attach_kprobe(event=syscall_fnname, fn_name="syscall__entry")
+    b.attach_kretprobe(event=syscall_fnname, fn_name="trace_return")
 
-if BPF.ksymname("sys_newstat") != -1:
-    b.attach_kprobe(event="sys_newstat", fn_name="trace_entry")
-    b.attach_kretprobe(event="sys_newstat", fn_name="trace_return")
+syscall_fnname = b.get_syscall_fnname("newstat")
+if BPF.ksymname(syscall_fnname) != -1:
+    b.attach_kprobe(event=syscall_fnname, fn_name="syscall__entry")
+    b.attach_kretprobe(event=syscall_fnname, fn_name="trace_return")
 
 TASK_COMM_LEN = 16    # linux/sched.h
 NAME_MAX = 255        # linux/limits.h
@@ -169,10 +172,14 @@ def print_event(cpu, data, size):
     if args.timestamp:
         print("%-14.9f" % (float(event.ts_ns - start_ts) / 1000000000), end="")
 
-    print("%-6d %-16s %4d %3d %s" % (event.pid, event.comm.decode(),
-        fd_s, err, event.fname.decode()))
+    print("%-6d %-16s %4d %3d %s" % (event.pid,
+        event.comm.decode('utf-8', 'replace'), fd_s, err,
+        event.fname.decode('utf-8', 'replace')))
 
 # loop with callback to print_event
 b["events"].open_perf_buffer(print_event, page_cnt=64)
 while 1:
-    b.perf_buffer_poll()
+    try:
+        b.perf_buffer_poll()
+    except KeyboardInterrupt:
+        exit()
